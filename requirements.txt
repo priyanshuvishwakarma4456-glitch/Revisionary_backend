@@ -1,4 +1,10 @@
 flask
 gunicorn
 requests
+python-dotenv
+pypdf
+pdfplumber
+groq
+flask-cors
+
 # ... any other libraries you used
