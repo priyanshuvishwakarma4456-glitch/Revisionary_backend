@@ -98,6 +98,6 @@ def generate_quiz():
         return jsonify({"error": "AI Error. Try again."}), 500
 
 if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=3000)
+    app.run(host='0.0.0.0', port=5000)
 
 
