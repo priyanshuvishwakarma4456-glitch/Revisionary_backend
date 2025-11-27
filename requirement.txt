@@ -1,4 +1,0 @@
-flask
-gunicorn
-requests
-# ... any other libraries you used
