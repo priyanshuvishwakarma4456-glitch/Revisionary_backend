@@ -57,7 +57,8 @@ def extract_json(text):
 def home():
     return "Revisionary is running (Groq Power)"
 
-@app.route('/generate-quiz', methods=['POST'])
+# --- IMPORTANT: Using UNDERSCORE to match standard frontend calls ---
+@app.route('/generate_quiz', methods=['POST'])
 def generate_quiz():
     if not client: return jsonify({"error": "Missing API Key"}), 500
 
@@ -70,20 +71,23 @@ def generate_quiz():
 
     context_text = ""
     
-    # --- PDF HANDLING (Now using pdfplumber) ---
+    # --- PDF HANDLING (OPTIMIZED FOR RENDER) ---
     if 'pdf' in request.files:
         file = request.files['pdf']
         if file.filename == '': return jsonify({"error": "No file"}), 400
         try:
-            # pdfplumber handles streams better for layout analysis
             with pdfplumber.open(file) as pdf:
-                for page in pdf.pages:
+                # --- LIMIT: Only read first 15 pages to prevent Timeouts ---
+                max_pages = 15
+                for i, page in enumerate(pdf.pages):
+                    if i >= max_pages: break # Stop reading after 15 pages
                     extracted = page.extract_text()
                     if extracted: context_text += extracted + "\n"
             
             context_text = clean_text(context_text)
             
             if len(context_text) < 50: return jsonify({"error": "PDF unreadable/scanned."}), 400
+            # Limit total characters to save memory
             context_text = context_text[:18000] 
         except Exception as e: 
             print(f"PDF Error: {e}")
@@ -97,18 +101,9 @@ def generate_quiz():
     try:
         print(f"Asking Groq for {num_questions} questions...")
 
-        # --- UPDATED PROMPT FOR GARBLED HINDI ---
         prompt = f"""
         You are a quiz generator.
         
-        CRITICAL INSTRUCTION FOR GARBLED TEXT:
-        The provided text likely contains **Legacy Hindi Font Encoding (Kruti Dev)**.
-        - If you see nonsensical English strings like "iatkc", "osQ", "iQhjkskiqj", interpret them as Hindi.
-        - Example: "iatkc" -> "sambandh" (Relationship).
-        - **DECODE the text mentally before generating questions.**
-        - Generate the final questions in **Standard English** (or Hindi if specifically requested).
-        - Do NOT create questions asking "What is the meaning of 'iatkc'?" or "Who is 'Nkouh'?". Decode them first.
-
         TASK:
         Generate exactly {num_questions} multiple choice questions in strictly valid JSON format.
         
@@ -157,6 +152,7 @@ def generate_quiz():
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=3000)
+    
     
 
 
