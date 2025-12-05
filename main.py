@@ -21,26 +21,20 @@ if not client:
 # --- GARBLED TEXT HANDLER ---
 def clean_text(raw_text):
     if not raw_text: return ""
-    # Normalize Unicode (Fixes separated accents/matras in Hindi)
     text = unicodedata.normalize('NFKC', raw_text)
-    # Collapse Whitespace
     text = re.sub(r'\s+', ' ', text).strip()
     return text
 
 def extract_json(text):
-    # 1. Clean Markdown
     text = text.replace("```json", "").replace("```", "").strip()
-    # 2. Locate start
     start = text.find('[')
     if start == -1: return "[]"
     text = text[start:] 
-    # 3. Fast Path
     try:
         json.loads(text)
         return text
     except json.JSONDecodeError:
         pass
-    # 4. Repair
     cursor = len(text)
     while cursor > 0:
         cursor = text.rfind('}', 0, cursor)
@@ -55,10 +49,10 @@ def extract_json(text):
 
 @app.route('/')
 def home():
-    return "Revisionary is running (Groq Power)"
+    return "Revisionary is running on Replit (Compat Mode)"
 
-# --- IMPORTANT: Using UNDERSCORE to match standard frontend calls ---
-@app.route('/generate_quiz', methods=['POST'])
+# --- CRITICAL FIX: USING HYPHEN (-) TO MATCH YOUR APK ---
+@app.route('/generate-quiz', methods=['POST'])
 def generate_quiz():
     if not client: return jsonify({"error": "Missing API Key"}), 500
 
@@ -71,23 +65,22 @@ def generate_quiz():
 
     context_text = ""
     
-    # --- PDF HANDLING (OPTIMIZED FOR RENDER) ---
+    # --- PDF HANDLING (OPTIMIZED) ---
     if 'pdf' in request.files:
         file = request.files['pdf']
         if file.filename == '': return jsonify({"error": "No file"}), 400
         try:
             with pdfplumber.open(file) as pdf:
-                # --- LIMIT: Only read first 15 pages to prevent Timeouts ---
+                # Limit to 15 pages to prevent crash on large books like Gulliver's Travels
                 max_pages = 15
                 for i, page in enumerate(pdf.pages):
-                    if i >= max_pages: break # Stop reading after 15 pages
+                    if i >= max_pages: break 
                     extracted = page.extract_text()
                     if extracted: context_text += extracted + "\n"
             
             context_text = clean_text(context_text)
             
             if len(context_text) < 50: return jsonify({"error": "PDF unreadable/scanned."}), 400
-            # Limit total characters to save memory
             context_text = context_text[:18000] 
         except Exception as e: 
             print(f"PDF Error: {e}")
@@ -152,7 +145,6 @@ def generate_quiz():
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=3000)
-    
     
 
 
