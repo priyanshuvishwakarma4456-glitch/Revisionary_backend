@@ -1,11 +1,13 @@
 import os
 import re
 import json
+import random
 import traceback
 import unicodedata
+import base64
 from flask import Flask, request, jsonify
 from flask_cors import CORS
-import pdfplumber
+import PyPDF2
 from groq import Groq
 
 app = Flask(__name__)
@@ -15,10 +17,6 @@ CORS(app)
 api_key = os.environ.get("GROQ_API_KEY")
 client = Groq(api_key=api_key) if api_key else None
 
-if not client:
-    print("⚠️ WARNING: GROQ_API_KEY not found. App will fail to generate.")
-
-# --- GARBLED TEXT HANDLER ---
 def clean_text(raw_text):
     if not raw_text: return ""
     text = unicodedata.normalize('NFKC', raw_text)
@@ -28,120 +26,150 @@ def clean_text(raw_text):
 def extract_json(text):
     text = text.replace("```json", "").replace("```", "").strip()
     start = text.find('[')
-    if start == -1: return "[]"
-    text = text[start:] 
-    try:
-        json.loads(text)
-        return text
-    except json.JSONDecodeError:
-        pass
-    cursor = len(text)
-    while cursor > 0:
-        cursor = text.rfind('}', 0, cursor)
-        if cursor == -1: break 
-        candidate = text[:cursor+1] + "]"
-        try:
-            json.loads(candidate)
-            return candidate
-        except json.JSONDecodeError:
-            continue
+    end = text.rfind(']')
+    if start != -1 and end != -1:
+        return text[start:end+1]
+    if start != -1: return text[start:] + "]"
     return "[]"
+
+# --- NEW LOGIC ASSEMBLER ---
+# This builds the quiz options manually in Python so they can never be wrong.
+def assemble_quiz(raw_data, target_count):
+    final_quiz = []
+    
+    for item in raw_data:
+        # 1. Get the parts
+        question = str(item.get('question', '')).replace('$', '').replace('\\', '')
+        correct_txt = str(item.get('correct_answer', '')).replace('$', '').replace('\\', '')
+        wrong_list = item.get('wrong_answers', [])
+        explanation = str(item.get('explanation', ''))
+
+        # 2. Clean up Wrong Answers
+        clean_wrongs = []
+        for w in wrong_list:
+            w = str(w).replace('$', '').replace('\\', '')
+            clean_wrongs.append(w)
+
+        # 3. Ensure we have exactly 3 wrong answers (Pad or Cut)
+        # If AI gave too few wrongs, add placeholders
+        while len(clean_wrongs) < 3:
+            clean_wrongs.append("None of the above")
+        # If AI gave too many, keep only 3
+        clean_wrongs = clean_wrongs[:3]
+
+        # 4. Combine and Shuffle
+        all_options = [correct_txt] + clean_wrongs
+        random.shuffle(all_options)
+
+        # 5. Find the Index (The Truth)
+        try:
+            # We calculate the index logically by looking for the text
+            correct_index = all_options.index(correct_txt)
+        except:
+            correct_index = 0 # Fallback
+
+        # 6. Build the Final Object for the App
+        quiz_item = {
+            "question": question,
+            "options": all_options,        # The shuffled list
+            "correct_indices": [correct_index], # The Calculated Index
+            "explanation": explanation,
+            "type": "single"
+        }
+        
+        final_quiz.append(quiz_item)
+
+    # 7. Quantity Limit
+    return final_quiz[:target_count]
 
 @app.route('/')
 def home():
-    return "Revisionary is running on Replit (Compat Mode)"
+    return "Revisionary Server: Priyanshu"
 
-# --- CRITICAL FIX: USING HYPHEN (-) TO MATCH YOUR APK ---
 @app.route('/generate-quiz', methods=['POST'])
+@app.route('/generate_quiz', methods=['POST'])
 def generate_quiz():
     if not client: return jsonify({"error": "Missing API Key"}), 500
 
-    topic = request.form.get('topic', '').strip()
     try:
         num_questions = int(request.form.get('count', '5'))
-        if num_questions > 20: num_questions = 20
     except:
         num_questions = 5
 
     context_text = ""
     
-    # --- PDF HANDLING (OPTIMIZED) ---
     if 'pdf' in request.files:
         file = request.files['pdf']
-        if file.filename == '': return jsonify({"error": "No file"}), 400
+        filename = file.filename.lower()
+        if filename.endswith(('.png', '.jpg', '.jpeg', '.webp')):
+             return jsonify({"error": "Image AI updating. Use PDF."}), 400
+             
         try:
-            with pdfplumber.open(file) as pdf:
-                # Limit to 15 pages to prevent crash on large books like Gulliver's Travels
-                max_pages = 15
-                for i, page in enumerate(pdf.pages):
-                    if i >= max_pages: break 
-                    extracted = page.extract_text()
-                    if extracted: context_text += extracted + "\n"
+            file.seek(0)
+            reader = PyPDF2.PdfReader(file)
+            limit = min(len(reader.pages), 20) # Read more pages for better context
+            for i in range(limit):
+                page_text = reader.pages[i].extract_text()
+                if page_text: context_text += page_text + "\n"
             
             context_text = clean_text(context_text)
-            
-            if len(context_text) < 50: return jsonify({"error": "PDF unreadable/scanned."}), 400
-            context_text = context_text[:18000] 
-        except Exception as e: 
-            print(f"PDF Error: {e}")
-            return jsonify({"error": "PDF Error"}), 500
-    elif topic:
-        context_text = f"Generate questions about: {topic}"
-    else:
-        return jsonify({"error": "No input"}), 400
+            if len(context_text) < 50: return jsonify({"error": "PDF empty."}), 400
+            context_text = context_text[:15000]
+        except:
+            return jsonify({"error": "PDF Fail."}), 500
 
-    # --- ASK GROQ ---
+    elif request.form.get('topic'):
+        context_text = request.form.get('topic')
+
     try:
         print(f"Asking Groq for {num_questions} questions...")
 
-        prompt = f"""
-        You are a quiz generator.
+        # --- NEW PROMPT: SEPARATE CORRECT AND WRONG ---
+        system_instructions = f"""
+        You are an expert quiz generator.
         
-        TASK:
-        Generate exactly {num_questions} multiple choice questions in strictly valid JSON format.
+        TASK: Generate exactly {num_questions} questions based on the text.
         
-        RULES:
-        1. Output MUST be a raw JSON list [{{...}}, {{...}}].
-        2. Do not include any text outside the JSON.
-        3. "correct_indices" must be a list of integers (0=A, 1=B, 2=C, 3=D).
+        CRITICAL RULES:
+        1. **Math Accuracy**: If text implies "2 is irrational", assume "Root 2". Verify your math.
+        2. **Format**: Do NOT put options together. Give me the 'correct_answer' and 'wrong_answers' separately.
+        3. **Explanation**: Explain why 'correct_answer' is right.
         
-        CONTENT:
-        {context_text}
-
-        JSON STRUCTURE:
+        Output Format (JSON List):
         [
-            {{
-                "question": "Question?", 
-                "type": "single",
-                "options": ["A", "B", "C", "D"], 
-                "correct_indices": [0],
-                "explanation": "Exp"
-            }}
+          {{
+            "question": "Question Text",
+            "correct_answer": "The Correct Text",
+            "wrong_answers": ["Wrong 1", "Wrong 2", "Wrong 3"],
+            "explanation": "Reasoning..."
+          }}
         ]
         """
 
         chat = client.chat.completions.create(
-            messages=[{"role": "user", "content": prompt}],
-            model="llama-3.3-70b-versatile", 
-            temperature=0.2, 
-            max_tokens=8000, 
+            messages=[
+                {"role": "system", "content": system_instructions},
+                {"role": "user", "content": f"Context:\n{context_text}"}
+            ],
+            model="llama-3.1-8b-instant",
+            temperature=0.2, # Low temp = better logic
+            max_tokens=4000
         )
 
         json_str = extract_json(chat.choices[0].message.content)
         data = json.loads(json_str)
         
-        if not data: return jsonify({"error": "AI response was too broken to fix."}), 500
+        # --- PYTHON ASSEMBLY LINE ---
+        final_data = assemble_quiz(data, num_questions)
+        
+        if not final_data: return jsonify({"error": "AI response empty."}), 500
 
-        if len(data) > num_questions:
-            data = data[:num_questions]
-
-        print(f"Success! Sending {len(data)} questions.")
-        return jsonify(data)
+        return jsonify(final_data)
 
     except Exception as e:
-        print(f"Backend Error: {e}")
+        print(f"Error: {e}")
         traceback.print_exc()
-        return jsonify({"error": "Server Processing Error"}), 500
+        return jsonify({"error": "Server Error."}), 500
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=3000)

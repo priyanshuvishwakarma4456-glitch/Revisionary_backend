@@ -6,5 +6,6 @@ pypdf
 pdfplumber
 groq
 flask-cors
+pypdf2
 
 # ... any other libraries you used
